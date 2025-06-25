@@ -1,18 +1,25 @@
 import datetime
 import tqdm
+import argparse
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://dps.psx.com.pk/historical"
 MONTH = datetime.datetime.now().month  # Get the current month
 YEAR = datetime.datetime.now().year  # Get the current year
-MONEY_TO_INVEST = 300_000  # Total money to invest
-
-PATH_TO_CURRENT_PORTFOLIO = f"Investments - Current Portfolio.csv"
 
 
 def get_kse100_data():
+    """
+    Fetches and parses the KSE-100 index data from the Pakistan Stock Exchange website.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the KSE-100 index data with columns as table headers.
+
+    Raises:
+        requests.RequestException: If the HTTP request to the PSX website fails.
+        AttributeError: If the expected table structure is not found in the HTML.
+    """
     # Fetch KSE-100 index data for the specified month
     kse100 = "https://dps.psx.com.pk/indices/KSE100"
     response = requests.get(kse100)
@@ -38,6 +45,22 @@ def get_kse100_data():
 
 
 def get_psx_data(symbol, month=MONTH, year=YEAR):
+    """
+    Fetches PSX (Pakistan Stock Exchange) data for a given symbol, month, and year.
+
+    Args:
+        symbol (str): The stock symbol to fetch data for.
+        month (str or int, optional): The month for which to fetch data. Defaults to MONTH.
+        year (str or int, optional): The year for which to fetch data. Defaults to YEAR.
+
+    Returns:
+        dict: A dictionary containing the symbol, date, open, high, low, close, and volume values for the latest entry in the returned data.
+
+    Raises:
+        requests.RequestException: If the HTTP request to the PSX data source fails.
+        AttributeError: If the expected table structure is not found in the HTML response.
+    """
+    BASE_URL = "https://dps.psx.com.pk/historical"
     # Fetch PSX data for a specific symbol for the specified month and year
     data = {
         "month": month,
@@ -62,6 +85,16 @@ def get_psx_data(symbol, month=MONTH, year=YEAR):
 
 
 def compare_with_existing_data(df, symbol):
+    """
+    Compares the provided symbol with existing data in the DataFrame and returns the total amount already invested in that symbol.
+    
+    Args:
+        df (pandas.DataFrame): The DataFrame containing investment data with columns ["SYMBOL", "SHARE_PRICE", "SHARES", "TOTAL_INVESTED"].
+        symbol (str): The symbol to check for existing investment.
+    
+    Returns:
+        float or int: The total amount already invested in the given symbol. Returns 0 if the symbol is not found in the DataFrame.
+    """
     # Check how much is already invested in the symbol 
     existing_row = df[ df["SYMBOL"] == symbol ]
     if not len(existing_row):
@@ -73,6 +106,12 @@ def compare_with_existing_data(df, symbol):
 
 # Example usage
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PSX Investment Script")
+    parser.add_argument('--money_to_invest', type=float, required=True, help='Amount of money to invest')
+    parser.add_argument('--path_to_current_portfolio', type=str, required=True, help='Path to current portfolio')    
+    parser.add_argument('--threshold', type=float, required=False, default=0, help='Threshold beyond which a stock is considered expensive')
+    args = parser.parse_args()
+
     print("Fetching PSX data...")
     kse100 = get_kse100_data()
 
@@ -82,7 +121,7 @@ if __name__ == "__main__":
     weightages = kse100["IDX WTG (%)"].tolist()
 
     # calculate how much to invest in each stock
-    money_invested_per_symbol = [MONEY_TO_INVEST * (float(wtg.replace("%", "")) / 100) for wtg in weightages]
+    money_invested_per_symbol = [args.money_to_invest * (float(wtg.replace("%", "")) / 100) for wtg in weightages]
     kse100["MONEY INVESTED"] = money_invested_per_symbol
     kse100["SHARES"] = list(map(lambda x: max(x, 1), (kse100["MONEY INVESTED"] / kse100["CURRENT"].str.replace(",", "").astype(float)).round(0)))
     
@@ -90,7 +129,7 @@ if __name__ == "__main__":
     kse100.to_csv(f"kse100_data_month_{MONTH}.csv", index=False)
 
     # Load current portfolio
-    current_portfolio = pd.read_csv(PATH_TO_CURRENT_PORTFOLIO)
+    current_portfolio = pd.read_csv(args.path_to_current_portfolio)
     
     # Create an investment plan
     header_list = ["SYMBOL", "PRICE_TO_INVEST", "CURRENT_PRICE", "SHARES"]
@@ -103,16 +142,19 @@ if __name__ == "__main__":
             raise Exception("Not possible since symbols are fetched from kse100-df")
         
         _, _, _, CURRENT, _, _, _, _, _, _, _, MONEY_INVESTED, _ = row.iloc[0]
+        CURRENT = float(CURRENT.replace(",", ""))
 
         # Calculate how much to invest
         MONEY_TO_INVEST_NOW = max(MONEY_INVESTED - existing_investment, 0)
-        SHARES_TO_BUY = float(MONEY_TO_INVEST_NOW) // float(CURRENT.replace(",", ""))
+        SHARES_TO_BUY = int( float(MONEY_TO_INVEST_NOW) // CURRENT )
         
-        # cater for low percentage shares that you don't own yet
-        # if money to invest is 0, it means you already own enough shares than needed for index fund
-        if MONEY_TO_INVEST_NOW:
-            SHARES_TO_BUY += 1
-        
+        # If you are not invested in a stock
+        # And the stock does not have enough weightage to buy 1 share of it in your given budget
+        # instead of skipping the stock by suggesting 0
+        # you can check whether the stock price is below a certain threshold and buy a single share of it
+        if not existing_investment and not SHARES_TO_BUY and CURRENT <= args.threshold:
+            SHARES_TO_BUY = 1
+
         rows.append({
             "SYMBOL": symbol, 
             "PRICE_TO_INVEST": MONEY_TO_INVEST_NOW, 
