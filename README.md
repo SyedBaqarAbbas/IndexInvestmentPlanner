@@ -6,22 +6,43 @@ This tool helps you plan your investments in the KSE-100 index. It calculates ho
 
 ## How to Use
 
-1. **Provide Your Current Portfolio**
+### 1. Install Requirements
 
-   List your current holdings in the following format:
+Make sure you have Python 3 installed.  
+Install the required packages using:
 
-   ```
-   SYMBOL,SHARE PRICE,SHARES,TOTAL INVESTED
-   MIIETF,12.97,2500,32425
-   FFC,357.02,65,23206.3
-   ```
+```sh
+pip install -r requirements.txt
+```
 
-2. **Set Your Total Investment (`MONEY_TO_INVEST`)**
+## 2. Prepare Your Current Portfolio
 
-   Specify the total amount you want to have invested in the KSE-100, including your current holdings.
+Create or update your portfolio CSV file (e.g., `Investments - Current Portfolio.csv`) in the following format:
 
-   *Example:*  
-   If you want your total KSE-100 investment to be 300,000, the tool will calculate the required investment in each company according to its weightage, subtract your existing investments, and generate a plan showing how many additional shares you need to buy.
+```
+SYMBOL,SHARE_PRICE,SHARES,TOTAL_INVESTED
+FFC,357.02,65,23206.3
+...
+```
+
+## 3. Run the Script
+
+Use the command line to run the script with the required arguments:
+
+```sh
+python psx.py --money_to_invest <TOTAL_AMOUNT> --path_to_current_portfolio "<PORTFOLIO_CSV_PATH>"
+```
+
+- `<TOTAL_AMOUNT>`: The total amount you want to have invested (e.g., 300000).
+- `<PORTFOLIO_CSV_PATH>`: Path to your current portfolio CSV file.
+
+**Optional:**  
+You can also specify a `--threshold` value to define the maximum price for buying a single share of an otherwise underweight stock:
+
+```sh
+python psx.py --money_to_invest 300000 --path_to_current_portfolio "Investments - Current Portfolio.csv" --threshold 100
+```
+
 
 ## Output
 
