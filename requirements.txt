@@ -2,3 +2,4 @@ tqdm
 requests
 pandas
 beautifulsoup4
+streamlit
