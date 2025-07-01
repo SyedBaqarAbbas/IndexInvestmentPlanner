@@ -104,32 +104,39 @@ def compare_with_existing_data(df, symbol):
     return TOTAL_INVESTED
 
 
-# Example usage
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PSX Investment Script")
-    parser.add_argument('--money_to_invest', type=float, required=True, help='Amount of money to invest')
-    parser.add_argument('--path_to_current_portfolio', type=str, required=True, help='Path to current portfolio')    
-    parser.add_argument('--threshold', type=float, required=False, default=0, help='Threshold beyond which a stock is considered expensive')
-    args = parser.parse_args()
-
-    print("Fetching PSX data...")
-    kse100 = get_kse100_data()
-
+def compare_current_with_index(kse100: pd.DataFrame, 
+                               current_portfolio: pd.DataFrame,
+                               money_to_invest: float, 
+                               threshold: float):
+    """
+    Compares the current investment portfolio with the KSE-100 index and generates an investment plan
+    to align the portfolio with the index's weightages.
+    This function:
+    - Cleans the KSE-100 DataFrame by removing "XD" from stock symbols.
+    - Calculates the amount to invest in each stock based on index weightages and total money to invest.
+    - Determines the number of shares to buy for each stock, ensuring at least one share is bought if the stock price is below a specified threshold.
+    - Considers existing investments in the current portfolio to avoid over-investing.
+    - Returns a DataFrame with the recommended investment plan, including the symbol, amount to invest, current price, and shares to buy.
+    Args:
+        kse100 (pd.DataFrame): DataFrame containing KSE-100 index data with columns including "SYMBOL", "IDX WTG (%)", and "CURRENT".
+        current_portfolio (pd.DataFrame): DataFrame of the current portfolio holdings.
+        money_to_invest (float): Total amount of money available to invest.
+        threshold (float): Price threshold below which at least one share will be bought if not already invested.
+    Returns:
+        pd.DataFrame: DataFrame with columns ["SYMBOL", "PRICE_TO_INVEST", "CURRENT_PRICE", "SHARES"] representing the investment plan.
+    """
     # cleaning
     kse100["SYMBOL"] = kse100["SYMBOL"].str.replace("XD", "") # remove XD (ex-dividend) from name
     symbols = kse100["SYMBOL"].to_list()
     weightages = kse100["IDX WTG (%)"].tolist()
 
     # calculate how much to invest in each stock
-    money_invested_per_symbol = [args.money_to_invest * (float(wtg.replace("%", "")) / 100) for wtg in weightages]
+    money_invested_per_symbol = [money_to_invest * (float(wtg.replace("%", "")) / 100) for wtg in weightages]
     kse100["MONEY INVESTED"] = money_invested_per_symbol
     kse100["SHARES"] = list(map(lambda x: max(x, 1), (kse100["MONEY INVESTED"] / kse100["CURRENT"].str.replace(",", "").astype(float)).round(0)))
     
     # save to disk
     kse100.to_csv(f"kse100_data_month_{MONTH}.csv", index=False)
-
-    # Load current portfolio
-    current_portfolio = pd.read_csv(args.path_to_current_portfolio)
     
     # Create an investment plan
     header_list = ["SYMBOL", "PRICE_TO_INVEST", "CURRENT_PRICE", "SHARES"]
@@ -152,7 +159,7 @@ if __name__ == "__main__":
         # And the stock does not have enough weightage to buy 1 share of it in your given budget
         # instead of skipping the stock by suggesting 0
         # you can check whether the stock price is below a certain threshold and buy a single share of it
-        if not existing_investment and not SHARES_TO_BUY and CURRENT <= args.threshold:
+        if not existing_investment and not SHARES_TO_BUY and CURRENT <= threshold:
             SHARES_TO_BUY = 1
 
         rows.append({
@@ -163,6 +170,26 @@ if __name__ == "__main__":
         })
     
     # Compile, sort, and save
-    investment_plan = pd.DataFrame(data=rows, columns=header_list)
+    return pd.DataFrame(data=rows, columns=header_list)
+
+
+# Example usage
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PSX Investment Script")
+    parser.add_argument('--money_to_invest', type=float, required=True, help='Amount of money to invest')
+    parser.add_argument('--path_to_current_portfolio', type=str, required=True, help='Path to current portfolio')    
+    parser.add_argument('--threshold', type=float, required=False, default=0, help='Threshold beyond which a stock is considered expensive')
+    args = parser.parse_args()
+
+    print("Fetching PSX data...")
+    kse100 = get_kse100_data()
+
+    # Load current portfolio
+    current_portfolio = pd.read_csv(args.path_to_current_portfolio)
+
+    investment_plan = compare_current_with_index(kse100, 
+                                                 current_portfolio, 
+                                                 args.money_to_invest,
+                                                 args.threshold)
     investment_plan.sort_values(by="PRICE_TO_INVEST", ascending=False, inplace=True)
     investment_plan.to_csv("investment_plan.csv", index=None)
