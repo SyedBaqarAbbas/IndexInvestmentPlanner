@@ -27,6 +27,13 @@ FFC,357.02,65,23206.3
 
 ## 3. Run the Script
 
+### UI
+For the UI version, run:
+```sh
+streamlit run app.py
+```
+
+### Script
 Use the command line to run the script with the required arguments:
 
 ```sh
