@@ -1,5 +1,7 @@
 # KSE-100 Portfolio Investment Planner
 
+View the app here: [KSE-100 Index Investment Planner](https://kse100index.streamlit.app/)
+
 ## Overview
 
 This tool helps you plan your investments in the KSE-100 index. It calculates how much you need to invest in each company based on the index weightage, taking into account your current portfolio and your total investment goal.
