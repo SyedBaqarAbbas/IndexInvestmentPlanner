@@ -1,7 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import pandas as pd
 import streamlit as st
 
-from psx import compare_current_with_index, get_kse100_data
+from psx import compare_current_with_index, get_kse100_data, get_psx_data
 from securities_parser import (
     empty_portfolio_df,
     normalize_portfolio_df,
@@ -25,14 +27,43 @@ def determine_action(diff: int) -> str:
     return "HOLD"
 
 
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_latest_psx_prices(symbols: tuple[str, ...]) -> dict[str, float]:
+    def _fetch(symbol: str) -> tuple[str, float | None]:
+        try:
+            row = get_psx_data(symbol=symbol)
+            close_value = pd.to_numeric(
+                str(row.get("CLOSE", "")).replace(",", ""), errors="coerce"
+            )
+            if pd.notna(close_value) and float(close_value) > 0:
+                return symbol, float(close_value)
+        except Exception:
+            pass
+        return symbol, None
+
+    prices: dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        futures = {executor.submit(_fetch, symbol): symbol for symbol in symbols}
+        for future in as_completed(futures):
+            symbol, price = future.result()
+            if price is not None:
+                prices[symbol] = price
+    return prices
+
+
 def build_rebalance_plan(
-    kse100_df: pd.DataFrame, current_portfolio_df: pd.DataFrame, target_portfolio_value: float
+    kse100_df: pd.DataFrame,
+    current_portfolio_df: pd.DataFrame,
+    target_portfolio_value: float,
+    extra_symbol_prices: dict[str, float],
 ) -> pd.DataFrame:
     kse = kse100_df.copy()
     kse["SYMBOL"] = kse["SYMBOL"].astype(str).str.replace("XD", "", regex=False).str.strip().str.upper()
-    kse["CURRENT_PRICE"] = pd.to_numeric(
+    kse["KSE_CURRENT_PRICE"] = pd.to_numeric(
         kse["CURRENT"].astype(str).str.replace(",", "", regex=False), errors="coerce"
     )
+    # For KSE-100 symbols, use the index endpoint price directly.
+    kse["CURRENT_PRICE"] = kse["KSE_CURRENT_PRICE"]
     kse["IDX_WEIGHT"] = pd.to_numeric(
         kse["IDX WTG (%)"].astype(str).str.replace("%", "", regex=False), errors="coerce"
     )
@@ -63,6 +94,7 @@ def build_rebalance_plan(
     merged = pd.merge(target_df, current_df, on="SYMBOL", how="outer")
     merged["SHARES_TARGET"] = pd.to_numeric(merged["SHARES_TARGET"], errors="coerce").fillna(0).astype(int)
     merged["SHARES_CURRENT"] = pd.to_numeric(merged["SHARES_CURRENT"], errors="coerce").fillna(0).astype(int)
+    merged["CURRENT_PRICE"] = merged["CURRENT_PRICE"].fillna(merged["SYMBOL"].map(extra_symbol_prices))
     merged["CURRENT_PRICE"] = merged["CURRENT_PRICE"].fillna(merged["CURRENT_PRICE_PORTFOLIO"]).fillna(0.0)
 
     merged["DIFF"] = merged["SHARES_TARGET"] - merged["SHARES_CURRENT"]
@@ -169,6 +201,15 @@ money_to_invest = st.number_input(
     step=1000.0,
     help="Total portfolio value you want this plan to target.",
 )
+sell_non_kse100 = st.toggle(
+    "Sell existing stocks for rebalancing?",
+    value=False,
+    help=(
+        "Off: keep non-index holdings and show buy-only recommended investment plan. "
+        "On: allow selling and show full rebalance actions."
+        "Set to off if you want to retain your existing holdings while rebalancing."
+    ),
+)
 
 st.markdown('<div class="source-card">', unsafe_allow_html=True)
 portfolio_source = st.radio(
@@ -216,11 +257,33 @@ st.markdown("</div>", unsafe_allow_html=True)
 
 preview_col, metric_col = st.columns([2.2, 1.2])
 with preview_col:
-    st.subheader("Current Portfolio Preview")
+    if portfolio_source == "Upload Securities PDF":
+        st.subheader(
+            "Current Portfolio Preview",
+            help=(
+                "For uploaded securities statements, SHARE PRICE is your average buy price "
+                "parsed from the statement, not the latest market price."
+            ),
+        )
+    else:
+        st.subheader("Current Portfolio Preview")
     if portfolio_df.empty:
         st.caption("No portfolio loaded yet.")
     else:
-        st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
+        column_config = None
+        if portfolio_source == "Upload Securities PDF":
+            column_config = {
+                "SHARE PRICE": st.column_config.NumberColumn(
+                    "SHARE PRICE",
+                    help="Average buy price from your uploaded PDF statement.",
+                )
+            }
+        st.dataframe(
+            portfolio_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+        )
 
 with metric_col:
     st.subheader("Portfolio Snapshot")
@@ -250,23 +313,45 @@ if generate_plan:
     elif portfolio_source != "No current portfolio" and not input_is_valid:
         st.error("Upload a valid portfolio file before generating the plan.")
     else:
+        investment_plan = pd.DataFrame()
+        rebalance_plan = pd.DataFrame()
+        non_index_symbols: tuple[str, ...] = ()
+        extra_symbol_prices: dict[str, float] = {}
+
         with st.spinner("Fetching KSE-100 data and calculating plan..."):
             kse100 = get_kse100_data()
-            investment_plan = compare_current_with_index(
-                kse100=kse100,
-                current_portfolio=portfolio_df,
-                money_to_invest=money_to_invest,
-                threshold=0.0,
-            )
-            rebalance_plan = build_rebalance_plan(
-                kse100_df=kse100,
-                current_portfolio_df=portfolio_df,
-                target_portfolio_value=money_to_invest,
-            )
+            if sell_non_kse100:
+                kse_symbols = set(
+                    kse100["SYMBOL"]
+                    .astype(str)
+                    .str.replace("XD", "", regex=False)
+                    .str.strip()
+                    .str.upper()
+                )
+                portfolio_symbols = set(
+                    portfolio_df["SYMBOL"].astype(str).str.strip().str.upper().tolist()
+                    if not portfolio_df.empty
+                    else []
+                )
+                non_index_symbols = tuple(sorted(portfolio_symbols - kse_symbols))
+                extra_symbol_prices = fetch_latest_psx_prices(non_index_symbols)
+                rebalance_plan = build_rebalance_plan(
+                    kse100_df=kse100,
+                    current_portfolio_df=portfolio_df,
+                    target_portfolio_value=money_to_invest,
+                    extra_symbol_prices=extra_symbol_prices,
+                )
+            else:
+                investment_plan = compare_current_with_index(
+                    kse100=kse100,
+                    current_portfolio=portfolio_df,
+                    money_to_invest=money_to_invest,
+                    threshold=0.0,
+                )
 
-        if investment_plan.empty:
+        if not sell_non_kse100 and investment_plan.empty:
             st.warning("No stocks matched your criteria for buying at this time.")
-        else:
+        elif not sell_non_kse100:
             investment_plan = investment_plan.sort_values(by="PRICE_TO_INVEST", ascending=False)
             investment_plan.index = investment_plan.index + 1
 
@@ -286,23 +371,29 @@ if generate_plan:
                 icon=":material/download:",
                 use_container_width=True,
             )
+        else:
+            st.subheader("Rebalance Portfolio")
+            total_symbols = len(non_index_symbols)
+            st.caption(
+                "KSE-100 symbols use prices from `get_kse100_data`; "
+                f"non-index symbols fetched via `get_psx_data`: {len(extra_symbol_prices)}/{total_symbols}. "
+                "Fallback pricing used where unavailable."
+            )
+            rebalance_col1, rebalance_col2, rebalance_col3 = st.columns(3)
+            with rebalance_col1:
+                st.metric("BUY", f"{int((rebalance_plan['ACTION'] == 'BUY').sum())}")
+            with rebalance_col2:
+                st.metric("SELL", f"{int((rebalance_plan['ACTION'] == 'SELL').sum())}")
+            with rebalance_col3:
+                st.metric("HOLD", f"{int((rebalance_plan['ACTION'] == 'HOLD').sum())}")
 
-        st.subheader("Rebalance Actions")
-        rebalance_col1, rebalance_col2, rebalance_col3 = st.columns(3)
-        with rebalance_col1:
-            st.metric("BUY", f"{int((rebalance_plan['ACTION'] == 'BUY').sum())}")
-        with rebalance_col2:
-            st.metric("SELL", f"{int((rebalance_plan['ACTION'] == 'SELL').sum())}")
-        with rebalance_col3:
-            st.metric("HOLD", f"{int((rebalance_plan['ACTION'] == 'HOLD').sum())}")
-
-        styled_rebalance = rebalance_plan.style.apply(color_action_rows, axis=1)
-        st.dataframe(styled_rebalance, use_container_width=True, hide_index=True)
-        st.download_button(
-            label="Download Rebalance Plan",
-            data=convert_for_download(rebalance_plan),
-            file_name="rebalance_plan.csv",
-            mime="text/csv",
-            icon=":material/download:",
-            use_container_width=True,
-        )
+            styled_rebalance = rebalance_plan.style.apply(color_action_rows, axis=1)
+            st.dataframe(styled_rebalance, use_container_width=True, hide_index=True)
+            st.download_button(
+                label="Download Rebalance Plan",
+                data=convert_for_download(rebalance_plan),
+                file_name="rebalance_plan.csv",
+                mime="text/csv",
+                icon=":material/download:",
+                use_container_width=True,
+            )
