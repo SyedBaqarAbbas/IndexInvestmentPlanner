@@ -379,13 +379,21 @@ if generate_plan:
                 f"non-index symbols fetched via `get_psx_data`: {len(extra_symbol_prices)}/{total_symbols}. "
                 "Fallback pricing used where unavailable."
             )
-            rebalance_col1, rebalance_col2, rebalance_col3 = st.columns(3)
+            net_cash = float(rebalance_plan["TOTAL_COST"].sum())
+            rebalance_col1, rebalance_col2, rebalance_col3, rebalance_col4 = st.columns(4)
             with rebalance_col1:
                 st.metric("BUY", f"{int((rebalance_plan['ACTION'] == 'BUY').sum())}")
             with rebalance_col2:
                 st.metric("SELL", f"{int((rebalance_plan['ACTION'] == 'SELL').sum())}")
             with rebalance_col3:
                 st.metric("HOLD", f"{int((rebalance_plan['ACTION'] == 'HOLD').sum())}")
+            with rebalance_col4:
+                if net_cash > 0:
+                    st.metric("Cash Required", f"PKR {net_cash:,.0f}")
+                elif net_cash < 0:
+                    st.metric("Free Cash", f"PKR {abs(net_cash):,.0f}")
+                else:
+                    st.metric("Net Cash", "PKR 0")
 
             styled_rebalance = rebalance_plan.style.apply(color_action_rows, axis=1)
             st.dataframe(styled_rebalance, use_container_width=True, hide_index=True)
