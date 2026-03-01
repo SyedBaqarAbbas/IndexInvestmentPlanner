@@ -22,7 +22,7 @@ def get_kse100_data():
     """
     # Fetch KSE-100 index data for the specified month
     kse100 = "https://dps.psx.com.pk/indices/KSE100"
-    response = requests.get(kse100)
+    response = requests.get(kse100, timeout=20)
     soup = BeautifulSoup(response.content, "html.parser")
 
     # Extract the table header and body
@@ -44,7 +44,32 @@ def get_kse100_data():
     return df
 
 
-def get_psx_data(symbol, month=MONTH, year=YEAR):
+def _previous_month_year(month: int, year: int) -> tuple[int, int]:
+    if month == 1:
+        return 12, year - 1
+    return month - 1, year
+
+
+def _parse_latest_historical_row(page: bytes):
+    soup = BeautifulSoup(page, "html.parser")
+    tr_tags = soup.find_all('tr')
+    if len(tr_tags) < 2:
+        return None
+    td_tags = tr_tags[1].find_all('td')
+    if len(td_tags) < 6:
+        return None
+    DATE, OPEN, HIGH, LOW, CLOSE, VOLUME = td_tags[:6]
+    return {
+        "DATE": DATE.text.strip(),
+        "OPEN": OPEN.text.strip(),
+        "HIGH": HIGH.text.strip(),
+        "LOW": LOW.text.strip(),
+        "CLOSE": CLOSE.text.strip(),
+        "VOLUME": VOLUME.text.strip(),
+    }
+
+
+def get_psx_data(symbol, month=MONTH, year=YEAR, lookback_months=18):
     """
     Fetches PSX (Pakistan Stock Exchange) data for a given symbol, month, and year.
 
@@ -61,27 +86,28 @@ def get_psx_data(symbol, month=MONTH, year=YEAR):
         AttributeError: If the expected table structure is not found in the HTML response.
     """
     BASE_URL = "https://dps.psx.com.pk/historical"
-    # Fetch PSX data for a specific symbol for the specified month and year
-    data = {
-        "month": month,
-        "year": year,
-        "symbol": symbol
-    }
-    response = requests.post(BASE_URL, data=data)
-    page = response.content
-    soup = BeautifulSoup(page, "html.parser")
-    tr_tags = soup.find_all('tr')
-    DATE, OPEN,	HIGH, LOW, CLOSE, VOLUME = tr_tags[1].find_all('td')  # This will print the first date in the table
-    row = {
-        "SYMBOL": symbol,
-        "DATE": DATE.text, 
-        "OPEN": OPEN.text,	
-        "HIGH": HIGH.text, 
-        "LOW": LOW.text, 
-        "CLOSE": CLOSE.text, 
-        "VOLUME": VOLUME.text
-    }
-    return row
+    symbol = str(symbol).strip().upper()
+
+    current_month = int(month)
+    current_year = int(year)
+
+    for _ in range(max(int(lookback_months), 1)):
+        data = {
+            "month": current_month,
+            "year": current_year,
+            "symbol": symbol,
+        }
+        response = requests.post(BASE_URL, data=data, timeout=20)
+        parsed = _parse_latest_historical_row(response.content)
+        if parsed is not None:
+            parsed["SYMBOL"] = symbol
+            return parsed
+        current_month, current_year = _previous_month_year(current_month, current_year)
+
+    raise ValueError(
+        f"No historical PSX data found for symbol={symbol} "
+        f"within {lookback_months} months from {month}/{year}."
+    )
 
 
 def compare_with_existing_data(df, symbol):
