@@ -99,8 +99,7 @@ def compare_with_existing_data(df, symbol):
     existing_row = df[ df["SYMBOL"] == symbol ]
     if not len(existing_row):
         return 0
-    
-    SYMBOL, SHARE_PRICE, SHARES, TOTAL_INVESTED = existing_row.iloc[0]
+    TOTAL_INVESTED = existing_row.iloc[0][-1]
     return TOTAL_INVESTED
 
 
@@ -161,7 +160,8 @@ def compare_current_with_index(kse100: pd.DataFrame,
         # you can check whether the stock price is below a certain threshold and buy a single share of it
         if not existing_investment and not SHARES_TO_BUY and CURRENT <= threshold:
             SHARES_TO_BUY = 1
-
+        if not SHARES_TO_BUY:
+            continue
         rows.append({
             "SYMBOL": symbol, 
             "PRICE_TO_INVEST": MONEY_TO_INVEST_NOW, 
