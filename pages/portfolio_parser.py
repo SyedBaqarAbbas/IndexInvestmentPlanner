@@ -1,21 +1,14 @@
 import pandas as pd
 import streamlit as st
 
-from securities_parser import parse_securities_pdf_bytes, portfolio_from_parsed_rows
+from psx_app.portfolio import dataframe_to_csv_bytes, parse_statement_pdf
 
 st.set_page_config(page_title="Portfolio Parser", page_icon=":page_facing_up:", layout="wide")
 
 
-@st.cache_data
-def convert_for_download(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
-
-
 @st.cache_data(show_spinner=False)
 def parse_document(pdf_bytes: bytes) -> tuple[pd.DataFrame, pd.DataFrame]:
-    parsed_df = parse_securities_pdf_bytes(pdf_bytes)
-    portfolio_df = portfolio_from_parsed_rows(parsed_df)
-    return parsed_df, portfolio_df
+    return parse_statement_pdf(pdf_bytes)
 
 
 st.markdown(
@@ -87,7 +80,7 @@ else:
                 st.dataframe(portfolio, use_container_width=True, hide_index=True)
                 st.download_button(
                     label="Download Portfolio CSV",
-                    data=convert_for_download(portfolio),
+                    data=dataframe_to_csv_bytes(portfolio),
                     file_name="current_portfolio.csv",
                     mime="text/csv",
                     use_container_width=True,
@@ -97,7 +90,7 @@ else:
                 st.dataframe(parsed_rows, use_container_width=True, hide_index=True)
                 st.download_button(
                     label="Download Raw Parsed Rows",
-                    data=convert_for_download(parsed_rows),
+                    data=dataframe_to_csv_bytes(parsed_rows),
                     file_name="parsed_securities_rows.csv",
                     mime="text/csv",
                     use_container_width=True,

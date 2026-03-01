@@ -1,129 +1,33 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
 
-from psx import compare_current_with_index, get_kse100_data, get_psx_data
-from securities_parser import (
-    empty_portfolio_df,
-    normalize_portfolio_df,
-    parse_securities_pdf_bytes,
-    portfolio_from_parsed_rows,
+from psx_app.market import get_kse100_data, get_latest_psx_prices
+from psx_app.planner import (
+    build_rebalance_plan,
+    compare_current_with_index,
+    get_non_index_symbols,
 )
+from psx_app.portfolio import dataframe_to_csv_bytes, load_portfolio_csv_bytes, parse_statement_pdf
+from securities_parser import empty_portfolio_df
 
 st.set_page_config(page_title="KSE-100 Tracker", page_icon=":chart_with_upwards_trend:", layout="wide")
 
 
-@st.cache_data
-def convert_for_download(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
-
-
-def determine_action(diff: int) -> str:
-    if diff > 0:
-        return "BUY"
-    if diff < 0:
-        return "SELL"
-    return "HOLD"
+@st.cache_data(show_spinner=False, ttl=300)
+def fetch_kse100_data() -> pd.DataFrame:
+    return get_kse100_data()
 
 
 @st.cache_data(show_spinner=False, ttl=900)
-def fetch_latest_psx_prices(symbols: tuple[str, ...]) -> dict[str, float]:
-    def _fetch(symbol: str) -> tuple[str, float | None]:
-        try:
-            row = get_psx_data(symbol=symbol)
-            close_value = pd.to_numeric(
-                str(row.get("CLOSE", "")).replace(",", ""), errors="coerce"
-            )
-            if pd.notna(close_value) and float(close_value) > 0:
-                return symbol, float(close_value)
-        except Exception:
-            pass
-        return symbol, None
-
-    prices: dict[str, float] = {}
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        futures = {executor.submit(_fetch, symbol): symbol for symbol in symbols}
-        for future in as_completed(futures):
-            symbol, price = future.result()
-            if price is not None:
-                prices[symbol] = price
-    return prices
+def fetch_latest_prices(symbols: tuple[str, ...]) -> dict[str, float]:
+    return get_latest_psx_prices(symbols)
 
 
-def build_rebalance_plan(
-    kse100_df: pd.DataFrame,
-    current_portfolio_df: pd.DataFrame,
-    target_portfolio_value: float,
-    extra_symbol_prices: dict[str, float],
-) -> pd.DataFrame:
-    kse = kse100_df.copy()
-    kse["SYMBOL"] = kse["SYMBOL"].astype(str).str.replace("XD", "", regex=False).str.strip().str.upper()
-    kse["KSE_CURRENT_PRICE"] = pd.to_numeric(
-        kse["CURRENT"].astype(str).str.replace(",", "", regex=False), errors="coerce"
-    )
-    # For KSE-100 symbols, use the index endpoint price directly.
-    kse["CURRENT_PRICE"] = kse["KSE_CURRENT_PRICE"]
-    kse["IDX_WEIGHT"] = pd.to_numeric(
-        kse["IDX WTG (%)"].astype(str).str.replace("%", "", regex=False), errors="coerce"
-    )
-    kse["SHARES_TARGET"] = (
-        (target_portfolio_value * (kse["IDX_WEIGHT"] / 100.0) / kse["CURRENT_PRICE"])
-        .replace([float("inf"), float("-inf")], 0)
-        .fillna(0)
-        .round(0)
-        .astype(int)
-    )
-    target_df = (
-        kse[["SYMBOL", "CURRENT_PRICE", "SHARES_TARGET"]]
-        .groupby("SYMBOL", as_index=False)
-        .agg(CURRENT_PRICE=("CURRENT_PRICE", "first"), SHARES_TARGET=("SHARES_TARGET", "sum"))
-    )
-
-    current_df = current_portfolio_df.copy()
-    if current_df.empty:
-        current_df = pd.DataFrame(columns=["SYMBOL", "SHARES", "SHARE PRICE"])
-    current_df["SYMBOL"] = current_df["SYMBOL"].astype(str).str.strip().str.upper()
-    current_df["SHARES"] = pd.to_numeric(current_df["SHARES"], errors="coerce").fillna(0)
-    current_df["SHARE PRICE"] = pd.to_numeric(current_df["SHARE PRICE"], errors="coerce")
-    current_df = current_df.rename(
-        columns={"SHARES": "SHARES_CURRENT", "SHARE PRICE": "CURRENT_PRICE_PORTFOLIO"}
-    )
-    current_df = current_df[["SYMBOL", "SHARES_CURRENT", "CURRENT_PRICE_PORTFOLIO"]]
-
-    merged = pd.merge(target_df, current_df, on="SYMBOL", how="outer")
-    merged["SHARES_TARGET"] = pd.to_numeric(merged["SHARES_TARGET"], errors="coerce").fillna(0).astype(int)
-    merged["SHARES_CURRENT"] = pd.to_numeric(merged["SHARES_CURRENT"], errors="coerce").fillna(0).astype(int)
-    merged["CURRENT_PRICE"] = merged["CURRENT_PRICE"].fillna(merged["SYMBOL"].map(extra_symbol_prices))
-    merged["CURRENT_PRICE"] = merged["CURRENT_PRICE"].fillna(merged["CURRENT_PRICE_PORTFOLIO"]).fillna(0.0)
-
-    merged["DIFF"] = merged["SHARES_TARGET"] - merged["SHARES_CURRENT"]
-    merged["ACTION"] = merged["DIFF"].apply(determine_action)
-    merged["SHARES_TO_TRADE"] = merged["DIFF"].abs().astype(int)
-    merged["TOTAL_COST"] = merged.apply(
-        lambda row: row["SHARES_TO_TRADE"] * row["CURRENT_PRICE"]
-        if row["ACTION"] == "BUY"
-        else -row["SHARES_TO_TRADE"] * row["CURRENT_PRICE"]
-        if row["ACTION"] == "SELL"
-        else 0.0,
-        axis=1,
-    )
-
-    result = merged[
-        [
-            "SYMBOL",
-            "CURRENT_PRICE",
-            "SHARES_CURRENT",
-            "SHARES_TARGET",
-            "SHARES_TO_TRADE",
-            "ACTION",
-            "TOTAL_COST",
-        ]
-    ].copy()
-    result["CURRENT_PRICE"] = result["CURRENT_PRICE"].round(2)
-    result["TOTAL_COST"] = result["TOTAL_COST"].round(2)
-    result = result.sort_values(by=["ACTION", "SHARES_TO_TRADE"], ascending=[True, False])
-    return result.reset_index(drop=True)
+@st.cache_data(show_spinner=False)
+def parse_uploaded_statement(pdf_bytes: bytes) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return parse_statement_pdf(pdf_bytes)
 
 
 def color_action_rows(row: pd.Series) -> list[str]:
@@ -135,13 +39,6 @@ def color_action_rows(row: pd.Series) -> list[str]:
     else:
         color = "rgba(127, 127, 127, 0.08)"
     return [f"background-color: {color}" for _ in row]
-
-
-@st.cache_data(show_spinner=False)
-def parse_uploaded_statement(pdf_bytes: bytes) -> tuple[pd.DataFrame, pd.DataFrame]:
-    parsed_rows = parse_securities_pdf_bytes(pdf_bytes)
-    portfolio = portfolio_from_parsed_rows(parsed_rows)
-    return parsed_rows, portfolio
 
 
 st.markdown(
@@ -206,7 +103,7 @@ sell_non_kse100 = st.toggle(
     value=False,
     help=(
         "Off: keep non-index holdings and show buy-only recommended investment plan. "
-        "On: allow selling and show full rebalance actions."
+        "On: allow selling and show full rebalance actions. "
         "Set to off if you want to retain your existing holdings while rebalancing."
     ),
 )
@@ -241,8 +138,7 @@ if portfolio_source == "Upload Portfolio CSV":
     uploaded_csv = st.file_uploader("Upload current portfolio (.csv)", type=["csv"])
     if uploaded_csv is not None:
         try:
-            csv_df = pd.read_csv(uploaded_csv)
-            portfolio_df = normalize_portfolio_df(csv_df)
+            portfolio_df = load_portfolio_csv_bytes(uploaded_csv.getvalue())
             st.success("Portfolio CSV loaded.")
         except Exception as exc:
             input_is_valid = False
@@ -267,6 +163,7 @@ with preview_col:
         )
     else:
         st.subheader("Current Portfolio Preview")
+
     if portfolio_df.empty:
         st.caption("No portfolio loaded yet.")
     else:
@@ -299,7 +196,7 @@ if portfolio_source == "Upload Securities PDF" and not parsed_rows_df.empty:
         st.dataframe(parsed_rows_df, use_container_width=True, hide_index=True)
         st.download_button(
             label="Download Parsed Rows",
-            data=convert_for_download(parsed_rows_df),
+            data=dataframe_to_csv_bytes(parsed_rows_df),
             file_name="parsed_securities_rows.csv",
             mime="text/csv",
             use_container_width=True,
@@ -319,22 +216,10 @@ if generate_plan:
         extra_symbol_prices: dict[str, float] = {}
 
         with st.spinner("Fetching KSE-100 data and calculating plan..."):
-            kse100 = get_kse100_data()
+            kse100 = fetch_kse100_data()
             if sell_non_kse100:
-                kse_symbols = set(
-                    kse100["SYMBOL"]
-                    .astype(str)
-                    .str.replace("XD", "", regex=False)
-                    .str.strip()
-                    .str.upper()
-                )
-                portfolio_symbols = set(
-                    portfolio_df["SYMBOL"].astype(str).str.strip().str.upper().tolist()
-                    if not portfolio_df.empty
-                    else []
-                )
-                non_index_symbols = tuple(sorted(portfolio_symbols - kse_symbols))
-                extra_symbol_prices = fetch_latest_psx_prices(non_index_symbols)
+                non_index_symbols = get_non_index_symbols(kse100, portfolio_df)
+                extra_symbol_prices = fetch_latest_prices(non_index_symbols)
                 rebalance_plan = build_rebalance_plan(
                     kse100_df=kse100,
                     current_portfolio_df=portfolio_df,
@@ -352,9 +237,7 @@ if generate_plan:
         if not sell_non_kse100 and investment_plan.empty:
             st.warning("No stocks matched your criteria for buying at this time.")
         elif not sell_non_kse100:
-            investment_plan = investment_plan.sort_values(by="PRICE_TO_INVEST", ascending=False)
             investment_plan.index = investment_plan.index + 1
-
             st.subheader("Recommended Investment Plan")
             plan_col1, plan_col2 = st.columns(2)
             with plan_col1:
@@ -365,7 +248,7 @@ if generate_plan:
             st.dataframe(investment_plan, use_container_width=True)
             st.download_button(
                 label="Download Investment Plan",
-                data=convert_for_download(investment_plan),
+                data=dataframe_to_csv_bytes(investment_plan),
                 file_name="investment_plan.csv",
                 mime="text/csv",
                 icon=":material/download:",
@@ -399,7 +282,7 @@ if generate_plan:
             st.dataframe(styled_rebalance, use_container_width=True, hide_index=True)
             st.download_button(
                 label="Download Rebalance Plan",
-                data=convert_for_download(rebalance_plan),
+                data=dataframe_to_csv_bytes(rebalance_plan),
                 file_name="rebalance_plan.csv",
                 mime="text/csv",
                 icon=":material/download:",
