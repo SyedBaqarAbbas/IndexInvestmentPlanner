@@ -17,6 +17,94 @@ def convert_for_download(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 
+def determine_action(diff: int) -> str:
+    if diff > 0:
+        return "BUY"
+    if diff < 0:
+        return "SELL"
+    return "HOLD"
+
+
+def build_rebalance_plan(
+    kse100_df: pd.DataFrame, current_portfolio_df: pd.DataFrame, target_portfolio_value: float
+) -> pd.DataFrame:
+    kse = kse100_df.copy()
+    kse["SYMBOL"] = kse["SYMBOL"].astype(str).str.replace("XD", "", regex=False).str.strip().str.upper()
+    kse["CURRENT_PRICE"] = pd.to_numeric(
+        kse["CURRENT"].astype(str).str.replace(",", "", regex=False), errors="coerce"
+    )
+    kse["IDX_WEIGHT"] = pd.to_numeric(
+        kse["IDX WTG (%)"].astype(str).str.replace("%", "", regex=False), errors="coerce"
+    )
+    kse["SHARES_TARGET"] = (
+        (target_portfolio_value * (kse["IDX_WEIGHT"] / 100.0) / kse["CURRENT_PRICE"])
+        .replace([float("inf"), float("-inf")], 0)
+        .fillna(0)
+        .round(0)
+        .astype(int)
+    )
+    target_df = (
+        kse[["SYMBOL", "CURRENT_PRICE", "SHARES_TARGET"]]
+        .groupby("SYMBOL", as_index=False)
+        .agg(CURRENT_PRICE=("CURRENT_PRICE", "first"), SHARES_TARGET=("SHARES_TARGET", "sum"))
+    )
+
+    current_df = current_portfolio_df.copy()
+    if current_df.empty:
+        current_df = pd.DataFrame(columns=["SYMBOL", "SHARES", "SHARE PRICE"])
+    current_df["SYMBOL"] = current_df["SYMBOL"].astype(str).str.strip().str.upper()
+    current_df["SHARES"] = pd.to_numeric(current_df["SHARES"], errors="coerce").fillna(0)
+    current_df["SHARE PRICE"] = pd.to_numeric(current_df["SHARE PRICE"], errors="coerce")
+    current_df = current_df.rename(
+        columns={"SHARES": "SHARES_CURRENT", "SHARE PRICE": "CURRENT_PRICE_PORTFOLIO"}
+    )
+    current_df = current_df[["SYMBOL", "SHARES_CURRENT", "CURRENT_PRICE_PORTFOLIO"]]
+
+    merged = pd.merge(target_df, current_df, on="SYMBOL", how="outer")
+    merged["SHARES_TARGET"] = pd.to_numeric(merged["SHARES_TARGET"], errors="coerce").fillna(0).astype(int)
+    merged["SHARES_CURRENT"] = pd.to_numeric(merged["SHARES_CURRENT"], errors="coerce").fillna(0).astype(int)
+    merged["CURRENT_PRICE"] = merged["CURRENT_PRICE"].fillna(merged["CURRENT_PRICE_PORTFOLIO"]).fillna(0.0)
+
+    merged["DIFF"] = merged["SHARES_TARGET"] - merged["SHARES_CURRENT"]
+    merged["ACTION"] = merged["DIFF"].apply(determine_action)
+    merged["SHARES_TO_TRADE"] = merged["DIFF"].abs().astype(int)
+    merged["TOTAL_COST"] = merged.apply(
+        lambda row: row["SHARES_TO_TRADE"] * row["CURRENT_PRICE"]
+        if row["ACTION"] == "BUY"
+        else -row["SHARES_TO_TRADE"] * row["CURRENT_PRICE"]
+        if row["ACTION"] == "SELL"
+        else 0.0,
+        axis=1,
+    )
+
+    result = merged[
+        [
+            "SYMBOL",
+            "CURRENT_PRICE",
+            "SHARES_CURRENT",
+            "SHARES_TARGET",
+            "SHARES_TO_TRADE",
+            "ACTION",
+            "TOTAL_COST",
+        ]
+    ].copy()
+    result["CURRENT_PRICE"] = result["CURRENT_PRICE"].round(2)
+    result["TOTAL_COST"] = result["TOTAL_COST"].round(2)
+    result = result.sort_values(by=["ACTION", "SHARES_TO_TRADE"], ascending=[True, False])
+    return result.reset_index(drop=True)
+
+
+def color_action_rows(row: pd.Series) -> list[str]:
+    action = row.get("ACTION", "")
+    if action == "BUY":
+        color = "rgba(34, 197, 94, 0.18)"
+    elif action == "SELL":
+        color = "rgba(239, 68, 68, 0.18)"
+    else:
+        color = "rgba(127, 127, 127, 0.08)"
+    return [f"background-color: {color}" for _ in row]
+
+
 @st.cache_data(show_spinner=False)
 def parse_uploaded_statement(pdf_bytes: bytes) -> tuple[pd.DataFrame, pd.DataFrame]:
     parsed_rows = parse_securities_pdf_bytes(pdf_bytes)
@@ -170,6 +258,11 @@ if generate_plan:
                 money_to_invest=money_to_invest,
                 threshold=0.0,
             )
+            rebalance_plan = build_rebalance_plan(
+                kse100_df=kse100,
+                current_portfolio_df=portfolio_df,
+                target_portfolio_value=money_to_invest,
+            )
 
         if investment_plan.empty:
             st.warning("No stocks matched your criteria for buying at this time.")
@@ -193,3 +286,23 @@ if generate_plan:
                 icon=":material/download:",
                 use_container_width=True,
             )
+
+        st.subheader("Rebalance Actions")
+        rebalance_col1, rebalance_col2, rebalance_col3 = st.columns(3)
+        with rebalance_col1:
+            st.metric("BUY", f"{int((rebalance_plan['ACTION'] == 'BUY').sum())}")
+        with rebalance_col2:
+            st.metric("SELL", f"{int((rebalance_plan['ACTION'] == 'SELL').sum())}")
+        with rebalance_col3:
+            st.metric("HOLD", f"{int((rebalance_plan['ACTION'] == 'HOLD').sum())}")
+
+        styled_rebalance = rebalance_plan.style.apply(color_action_rows, axis=1)
+        st.dataframe(styled_rebalance, use_container_width=True, hide_index=True)
+        st.download_button(
+            label="Download Rebalance Plan",
+            data=convert_for_download(rebalance_plan),
+            file_name="rebalance_plan.csv",
+            mime="text/csv",
+            icon=":material/download:",
+            use_container_width=True,
+        )
